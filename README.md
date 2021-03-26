@@ -17,6 +17,17 @@ No folders should have spaces in their names. Use '-' (dash) in lieu of spaces.
 > internet). This repository should only contain scripts and documentation
 > developed internally that assist with an application's installation process.
 
+## Updates
+This repository will not always necessarily be the latest versions of these
+scripts. I have made those available that I can and have time to make available
+to assist the community that has assisted me over the years. I will do my best
+to keep things up-to-date, but cannot guarantee that will occur.
+
+## Supportability
+As stated, these are available to the community to use if they find them useful.
+I cannot directly support them and if you choose to use them, it is up to you to
+test them thoroughly in your environment and customize them to meet your needs.
+
 ## Intune Error Codes
 The exit/error/return codes we use often get mangled by Intune when reported up
 to the console. To assist with the conversion back and forth, try using the
