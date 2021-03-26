@@ -1,0 +1,8 @@
+{
+    "Name": "Edge",
+    "Version": "Latest",
+    "Vendor": "Microsoft",
+    "Date": "01/26/21",
+    "ScriptVersion": "1.0.0",
+    "ScriptAuthor": "Alex Entringer"
+}
