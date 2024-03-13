@@ -269,53 +269,76 @@ Function Write-Log {
 
 function Start-CustomProcess {
     [CmdletBinding()]
-    Param (
+    param (
         [Parameter(Mandatory=$true)]
         [string]$Path,
         [string]$Arguments,
         [switch]$ServiceUI
     )
-    $Psi = New-Object -TypeName System.Diagnostics.ProcessStartInfo
-    $Psi.CreateNoWindow = $true
-    $Psi.UseShellExecute = $false
-    $Psi.RedirectStandardOutput = $true
-    $Psi.RedirectStandardError = $true
-    if ($ServiceUI) {
-        $Psi.FileName = "$PSScriptRoot\ServiceUI.exe"
-        if ($Arguments) {
-            $Psi.Arguments = @(
-                '-process:explorer.exe'
-                "`"$Path`""
-                "$Arguments"
-            )
+    try {
+        if (Test-Path -Path $Path -PathType 'Leaf') {
+            $Psi = New-Object -TypeName System.Diagnostics.ProcessStartInfo
+            $Psi.CreateNoWindow = $true
+            $Psi.UseShellExecute = $false
+            $Psi.RedirectStandardOutput = $true
+            $Psi.RedirectStandardError = $true
+            if ($ServiceUI) {
+                if (Test-Path -Path "$PSScriptRoot\ServiceUI.exe" -PathType 'Leaf') {
+                    $Psi.FileName = "$PSScriptRoot\ServiceUI.exe"
+                    if ($Arguments) {
+                        $Psi.Arguments = @(
+                            '-process:explorer.exe'
+                            "`"$Path`""
+                            "$Arguments"
+                        )
+                    }
+                    else {
+                        $Psi.Arguments = @(
+                            '-process:explorer.exe'
+                            "`"$Path`""
+                        )
+                    }
+                }
+                else {
+                    throw "Failed to locate '$PSScriptRoot\ServiceUI.exe'."
+                }
+            }
+            else {
+                $Psi.FileName = $Path
+                if ($Arguments) {
+                    $Psi.Arguments = @("$Arguments")
+                }
+                else {
+                    $Psi.Arguments = @()
+                }
+            }
+            $Process = New-Object System.Diagnostics.Process
+            $Process.StartInfo = $Psi
+            Write-Log -Message "Starting Process with the following info: FileName: '$($Psi.FileName)', Arguments: '$($Psi.Arguments)', Working Directory: '$($Psi.WorkingDirectory)'" -Source 'System.Diagnostics.Process' -ScriptSection 'Start-CustomProcess'
+            $null = $Process.Start()
+            $Output = $Process.StandardOutput.ReadToEnd()
+            Write-Log -Message "Waiting for Process Name '$($Process.ProcessName)', ID '$($Process.Id)' to end." -Source 'System.Diagnostics.Process' -ScriptSection 'Start-CustomProcess'
+            $null = $Process.WaitForExit()
+            Write-Log -Message "Process Name '$($Process.ProcessName)', ID '$($Process.Id)' has exited." -Source 'System.Diagnostics.Process' -ScriptSection 'Start-CustomProcess'
+            Write-Log -Message "Process Output:`n$Output" -Source 'System.Diagnostics.Process' -ScriptSection 'Start-CustomProcess'
+            return $Process.ExitCode
         }
         else {
-            $Psi.Arguments = @(
-                '-process:explorer.exe'
-                "`"$Path`""
-            )
+            throw "Failed to locate '$Path'."
         }
     }
-    else {
-        $Psi.FileName = $Path
-        if ($Arguments) {
-            $Psi.Arguments = @("$Arguments")
-        }
-        else {
-            $Psi.Arguments = @()
-        }
+    catch {
+        Write-Log -Message "Failed to start '$Path'. Error: `n$($_)" -Source 'Test-Path' -ScriptSection 'Start-CustomProcess' -Severity 3
+        Write-Log -Message $LogDash -Source $ScriptSection
+        return 69902
     }
-    $Process = New-Object System.Diagnostics.Process
-    $Process.StartInfo = $Psi
-    [void]$Process.Start()
-    $Output = $Process.StandardOutput.ReadToEnd()
-    $Process.WaitForExit()
-    Write-Log -Message "Process Output:`n$Output" -Source 'System.Diagnostics.Process' -ScriptSection 'Start-CustomProcess'
-    return $Process.ExitCode
+    finally {
+        $null = $Process.Dispose()
+    }
 }
 
 function Remove-InvalidFileNameChars {
-    param(
+    param (
         [Parameter(Mandatory=$true,
         Position=0,
         ValueFromPipeline=$true,
@@ -323,111 +346,373 @@ function Remove-InvalidFileNameChars {
         [String]$Name
     )
 
-    $InvalidChars = [IO.Path]::GetInvalidFileNameChars() -join ''
-    $Re = "[{0}]" -f [RegEx]::Escape($InvalidChars)
-    return ($Name -replace $Re)
+    try {
+        $InvalidChars = [IO.Path]::GetInvalidFileNameChars() -join ''
+        $Re = "[{0}]" -f [RegEx]::Escape($InvalidChars)
+        return ($Name -replace $Re)
+    }
+    catch {
+        Write-Log -Message "Problem converting string with escapable characters. Error: `n$($_)" -Source 'Remove-InvalidFileNameChars' -ScriptSection $ScriptSection -Severity 3
+        Write-Log -Message $LogDash -Source $ScriptSection
+        return 69902
+    }
+}
+
+function Confirm-ESP {
+    try {
+        [bool]$DevicePrepNotRunning = $false
+        [bool]$DeviceSetupNotRunning = $false
+        [bool]$AccountSetupNotRunning = $false
+
+        [string]$AutoPilotSettingsKey = 'HKLM:\SOFTWARE\Microsoft\Provisioning\AutopilotSettings'
+        [string]$DevicePrepName = 'DevicePreparationCategory.Status'
+        [string]$DeviceSetupName = 'DeviceSetupCategory.Status'
+        [string]$AccountSetupName = 'AccountSetupCategory.Status'
+
+        [string]$AutoPilotDiagnosticsKey = 'HKLM:\SOFTWARE\Microsoft\Provisioning\Diagnostics\AutoPilot'
+        [string]$TenantIdName = 'CloudAssignedTenantId'
+
+        [string]$JoinInfoKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\CloudDomainJoin\JoinInfo'
+
+        [string]$CloudAssignedTenantID = (Get-ItemProperty -Path $AutoPilotDiagnosticsKey -Name $TenantIdName -ErrorAction 'Ignore').$TenantIdName
+
+        if (-not [string]::IsNullOrEmpty($CloudAssignedTenantID)) {
+            foreach ($Guid in (Get-ChildItem -Path $JoinInfoKey -ErrorAction 'Ignore')) {
+                [string]$AzureADTenantId = (Get-ItemProperty -Path "$JoinInfoKey\$($Guid.PSChildName)" -Name 'TenantId' -ErrorAction 'Ignore').'TenantId'
+            }
+
+            if ($CloudAssignedTenantID -eq $AzureADTenantId) {
+                $DevicePrepDetails = (Get-ItemProperty -Path $AutoPilotSettingsKey -Name $DevicePrepName -ErrorAction 'Ignore').$DevicePrepName
+                $DeviceSetupDetails = (Get-ItemProperty -Path $AutoPilotSettingsKey -Name $DeviceSetupName -ErrorAction 'Ignore').$DeviceSetupName
+                $AccountSetupDetails = (Get-ItemProperty -Path $AutoPilotSettingsKey -Name $AccountSetupName -ErrorAction 'Ignore').$AccountSetupName
+
+                if (-not [string]::IsNullOrEmpty($DevicePrepDetails)) {
+                    $DevicePrepDetails = $DevicePrepDetails | ConvertFrom-Json
+                }
+                else {
+                    $DevicePrepNotRunning = $true
+                }
+                if (-not [string]::IsNullOrEmpty($DeviceSetupDetails)) {
+                    $DeviceSetupDetails = $DeviceSetupDetails | ConvertFrom-Json
+                }
+                else {
+                    $DeviceSetupNotRunning = $true
+                }
+                if (-not [string]::IsNullOrEmpty($AccountSetupDetails)) {
+                    $AccountSetupDetails = $AccountSetupDetails | ConvertFrom-Json
+                }
+                else {
+                    $AccountSetupNotRunning = $true
+                }
+
+                if ((($DevicePrepDetails.categoryStatusMessage -in ('Complete','Failed')) -or ($DevicePrepDetails.categoryStatusText -in ('Complete','Failed'))) -or ($DevicePrepDetails.categoryState -notin ('notStarted','inProgress',$null))) {
+                    $DevicePrepNotRunning = $true
+                }
+                if ((($DeviceSetupDetails.categoryStatusMessage -in ('Complete','Failed')) -or ($DeviceSetupDetails.categoryStatusText -in ('Complete','Failed'))) -or ($DeviceSetupDetails.categoryState -notin ('notStarted','inProgress',$null))) {
+                    $DeviceSetupNotRunning = $true
+                }
+                if ((($AccountSetupDetails.categoryStatusMessage -in ('Complete','Failed')) -or ($AccountSetupDetails.categoryStatusText -in ('Complete','Failed'))) -or ($AccountSetupDetails.categoryState -notin ('notStarted','inProgress',$null))) {
+                    $AccountSetupNotRunning = $true
+                }
+                else {
+                    try {
+                        $CurrentTime = Get-Date
+                        [string]$AutoPilotStartTimeKey = 'HKLM:\SOFTWARE\Microsoft\Windows\Autopilot\EnrollmentStatusTracking\ESPTrackingInfo\Diagnostics\ExpectedPolicies'
+                        $AutoPilotStartTimeValue = (Get-Childitem -Path $AutoPilotStartTimeKey -Recurse -ErrorAction 'Ignore')
+                        if ([string]::IsNullOrEmpty($AutoPilotStartTimeValue)) {
+                            Write-Log -Message "ESP detected as running: Null or Empty value received from registry location '$AutoPilotStartTimeKey '." -Source 'Confirm-ESP' -ScriptSection $ScriptSection -Severity 2
+                        }
+                        elseif ($($AutoPilotStartTimeValue.Count) -gt 1) {
+                            Write-Log -Message "ESP detected as running: Multiple Date/Time values were returned. Count: '$($AutoPilotStartTimeValue.Count)'" -Source 'Confirm-ESP' -ScriptSection $ScriptSection -Severity 2
+                        }
+                        else {
+                            $AutoPilotStartTime = $AutoPilotStartTimeValue.PSChildName
+                        }
+
+                        $FormattedTime = [datetime]::Parse($AutoPilotStartTime)
+                        if ( $CurrentTime -ge $($FormattedTime.AddHours(1)) ) {
+                            $AccountSetupNotRunning = $true
+                        }
+                        else {
+                            Write-Log -Message "ESP detected as running: AutoPilot is still within the 1 hour allowance. Time that AutoPilot started '$AutoPilotStartTime', Time that this script ran '$CurrentTime'" -Source 'Confirm-ESP' -ScriptSection $ScriptSection -Severity 2
+                        }
+                    }
+                    catch  {
+                        Write-Log -Message "ESP detected as running: Time that AutoPilot started '$AutoPilotStartTime', Time that this script ran '$CurrentTime'" -Source 'Confirm-ESP' -ScriptSection $ScriptSection -Severity 2
+                    }
+                }
+
+                if ($DevicePrepNotRunning -and $DeviceSetupNotRunning -and $AccountSetupNotRunning) {
+                    $CategoryCount = 0
+                }
+                else {
+                    $CategoryCount = 1
+                }
+            }
+            else {
+                $CategoryCount = 0
+            }
+        }
+        else {
+            $CategoryCount = 0
+        }
+        return $CategoryCount
+    }
+    catch {
+        Write-Log -Message "Problem determining the ESP status. Error: `n$($_)" -Source 'Confirm-ESP' -ScriptSection $ScriptSection -Severity 3
+        Write-Log -Message $LogDash -Source $ScriptSection
+        exit 69902
+    }
+}
+
+function Add-PowerUtil {
+    $Namespaces = @(
+        'System.Threading'
+        'System.Threading.Tasks'
+    )
+
+    Add-Type -ErrorAction 'Stop' -Name 'PowerUtil' -Namespace 'Windows' -UsingNamespace $Namespaces -MemberDefinition @'
+[Flags]
+public enum EXECUTION_STATE : uint
+{
+    ES_AWAYMODE_REQUIRED = 0x00000040,
+    ES_CONTINUOUS = 0x80000000,
+    ES_DISPLAY_REQUIRED = 0x00000002,
+    ES_SYSTEM_REQUIRED = 0x00000001
+    // Legacy flag, should not be used.
+    // ES_USER_PRESENT = 0x00000004
+}
+[DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+static extern uint SetThreadExecutionState(EXECUTION_STATE esFlags);
+
+private static AutoResetEvent _event = new AutoResetEvent(false);
+
+public static void PreventPowerSave()
+{
+    (new TaskFactory()).StartNew(() =>
+        {
+            SetThreadExecutionState(
+                EXECUTION_STATE.ES_CONTINUOUS
+                | EXECUTION_STATE.ES_DISPLAY_REQUIRED
+                | EXECUTION_STATE.ES_SYSTEM_REQUIRED);
+            _event.WaitOne();
+
+        },
+        TaskCreationOptions.LongRunning);
+}
+
+public static void Shutdown()
+{
+    _event.Set();
+}
+'@
 }
 
 try {
-    $Data = Get-Content -Path "$PSScriptRoot\*.txt" -Raw | ConvertFrom-Json -ErrorAction 'Stop'
+    if (Test-Path -Path "$PSScriptRoot\*-AppSettings.json" -PathType 'Leaf') {
+        $Data = Get-Content -Path "$PSScriptRoot\*-AppSettings.json" -Raw | ConvertFrom-Json -ErrorAction 'Stop'
+    }
+    else {
+        $Data = Get-Content -Path "$PSScriptRoot\*.txt" -Raw | ConvertFrom-Json -ErrorAction 'Stop'
+    }
 }
 catch {
     exit 69900
 }
 
-$TxtFileValues = @(
-    'Name'
-    'Version'
-    'Vendor'
-)
+try {
+    $JsonFileValues = @(
+        'Name'
+        'Version'
+        'Vendor'
+    )
 
-foreach ($Item in $TxtFileValues) {
-    if ([string]::IsNullOrEmpty($($Data.$Item))) {
-        exit 69900
+    foreach ($Item in $JsonFileValues) {
+        if ([string]::IsNullOrEmpty($($Data.$Item))) {
+            exit 69901
+        }
     }
+}
+catch {
+    exit 69901
 }
 
 #region Initialization
-$ScriptSection = 'Initialization'
-[string]$LogDash = '-' * 79
-$LogName = (Remove-InvalidFileNameChars -Name "$($Data.Vendor)_$($Data.Name)_$($Data.Version)_$($Mode).log") -replace ' ',''
-$LogFilePath = "$env:SystemRoot\Logs\Software"
+try {
+    [string]$ScriptSection = 'Initialization'
+    [string]$LogDash = '-' * 79
+    [string]$LogName = (Remove-InvalidFileNameChars -Name "$($Data.Vendor)_$($Data.Name)_$($Data.Version)_$($Mode).log") -replace ' ',''
+    [string]$LogFilePath = "$env:ProgramData\Logs\Software"
 
-#This MUST be changed each time this script is modified
-$ConfigureFileVersion = '1.1.0.0'
+    #This MUST be changed each time this script is modified
+    [string]$ConfigureFileVersion = '2.2.0.0'
 
-Write-Log -Message "Starting 'Configure.ps1' version: '$ConfigureFileVersion'" -Source 'Write-Log' -ScriptSection 'Initialization'
-Write-Log -Message "Starting $($Mode) process of $($Data.Name) $($Data.Version)" -Source 'Write-Log' -ScriptSection 'Initialization'
+    Write-Log -Message "Starting 'Configure.ps1' version: '$ConfigureFileVersion'" -Source 'Write-Log' -ScriptSection $ScriptSection
+    Write-Log -Message "Starting $($Mode) process of $($Data.Name) $($Data.Version)" -Source 'Write-Log' -ScriptSection $ScriptSection
 
-$ESPCloudHost = @(Get-CimInstance -ClassName 'Win32_Process' -Filter "Name like 'CloudExperienceHostBroker.exe'" -ErrorAction 'SilentlyContinue')
-$ESPWWAHost = @(Get-CimInstance -ClassName 'Win32_Process' -Filter "Name like 'WWAHost.exe'" -ErrorAction 'SilentlyContinue')
-$ExplorerProcesses = @(Get-CimInstance -ClassName 'Win32_Process' -Filter "Name like 'explorer.exe'" -ErrorAction 'SilentlyContinue')
-$ESPCount = 0
-$ESPCount = $ESPCloudHost.Count + $ESPWWAHost.Count
+    $ExplorerProcesses = @(Get-CimInstance -ClassName 'Win32_Process' -Filter "Name like 'explorer.exe'" -ErrorAction 'SilentlyContinue')
+    [int]$ESPCount = 0
+    $ESPCount = Confirm-ESP
+
+    # Import PowerUtil to be used as needed
+    Add-PowerUtil
+}
+catch {
+    Write-Log -Message 'There was an unexpected problem in the Initialization phase' -Source 'Write-Log' -ScriptSection $ScriptSection -Severity 3
+    Write-Log -Message "Error Message: `n$($_)" -Source 'Write-Log' -ScriptSection $ScriptSection -Severity 3
+    Write-Log -Message $LogDash -Source 'Write-Log' -ScriptSection $ScriptSection
+    exit 69902
+}
 #endregion Initialization
 
 #region Silent Processing
-if ($ExplorerProcesses.Count -eq 0 -Or $ESPCount -ne 0) {
-    if ($ExplorerProcesses.Count -eq 0) {
-        Write-Log -Message "No user present, will attempt non-interactive $($Mode)" -Source 'Get-CimInstance' -ScriptSection $ScriptSection
-    }
-    elseif ($ESPCount -ne 0) {
-        Write-Log -Message "Enrollment Status Page detected, will attempt non-interactive $($Mode)" -Source 'Get-CimInstance' -ScriptSection $ScriptSection
-    }
-    $ScriptSection = 'SilentProcessing'
-    try {
-        Write-Log -Message "Performing silent $($Mode)" -Source 'Start-CustomProcess' -ScriptSection $ScriptSection
-        $ExitCode = Start-CustomProcess -Path "$PSScriptRoot\Deploy-Application.exe" -Arguments "-DeploymentType $($Mode) -DeployMode Silent"
-    }
-    catch {
-        if ([string]::IsNullOrEmpty($ExitCode)) {
-            $ExitCode = 69901
-        }
-        Write-Log -Message "Error occured during $($Mode)" -Source 'Start-CustomProcess' -ScriptSection $ScriptSection
-        Write-Log -Message "Error Message: $($error[0])" -Source 'Start-CustomProcess' -ScriptSection $ScriptSection
-    }
-}
-#endregion Silent Processing
-#region Interactive Processing
-else {
-    foreach ($TargetProcess in $ExplorerProcesses) {
-        $Username = (Invoke-CimMethod -InputObject $TargetProcess -MethodName GetOwner).User
-        Write-Log -Message "'$Username' logged in running explorer PID: $($TargetProcess.ProcessId)" -Source 'Invoke-CimMethod' -ScriptSection $ScriptSection
-    }
+try {
+    Write-Log -Message 'Preventing computer from going to sleep while app is installing.' -Source 'PowerUtil-PreventPowerSave' -ScriptSection $ScriptSection
+    # Keep system awake, keep display on (prevent Modern Standby), provide reason as the current script command line
+    [Windows.PowerUtil]::PreventPowerSave()
 
-    if ($UserName -ne 'defaultuser0') {
-        Write-Log -Message "'$Username' appears to be normal user; launching process interactively." -Source 'Invoke-CimMethod' -ScriptSection $ScriptSection
-        $ScriptSection = 'InteractiveProcessing'
-        try {
-            Write-Log -Message "Running Deploy-Application.exe from ServiceUI" -Source 'Start-CustomProcess' -ScriptSection $ScriptSection
-            $ExitCode = Start-CustomProcess -Path "$PSScriptRoot\Deploy-Application.exe" -Arguments "-DeploymentType $($Mode)" -ServiceUI
+    if (($ExplorerProcesses.Count -eq 0) -or ($ESPCount -ne 0)) {
+        if ($ExplorerProcesses.Count -eq 0) {
+            Write-Log -Message "No user present, will attempt silent '$($Mode)'" -Source 'Get-CimInstance' -ScriptSection $ScriptSection
         }
-        catch {
-            if ([string]::IsNullOrEmpty($ExitCode)) {
-                $ExitCode = 69901
-            }
-            Write-Log -Message "Error occured attempting to launch ServiceUI" -Source 'Start-CustomProcess' -ScriptSection $ScriptSection
-            Write-Log -Message "Error Message: $($error[0])" -Source 'Start-CustomProcess' -ScriptSection $ScriptSection
+        elseif ($ESPCount -ne 0) {
+            Write-Log -Message "Enrollment Status Page detected, will attempt silent '$($Mode)'" -Source 'Get-CimInstance' -ScriptSection $ScriptSection
         }
-    }
-    else {
-        Write-Log -Message "'$Username' is defaultuser0; launching process silently as we must still be in ESP." -Source 'Invoke-CimMethod' -ScriptSection $ScriptSection
         $ScriptSection = 'SilentProcessing'
         try {
-            Write-Log -Message "Performing silent $($Mode)" -Source 'Start-CustomProcess' -ScriptSection $ScriptSection
-            $ExitCode = Start-CustomProcess -Path "$PSScriptRoot\Deploy-Application.exe" -Arguments "-DeploymentType $($Mode) -DeployMode Silent"
+            [string]$PowerShellPath = (Get-Command -Name 'powershell.exe').Source
+            $DeployArgs = @(
+                '-ExecutionPolicy Bypass'
+                '-NoProfile'
+                '-NoLogo'
+                '-WindowStyle Hidden'
+                "-File `"`"$PSScriptRoot\Deploy-Application.ps1`"`" -DeploymentType $($Mode) -DeployMode Silent"
+            )
+            Write-Log -Message "Performing silent '$($Mode)' with the following arguments '$DeployArgs'" -Source 'Start-CustomProcess' -ScriptSection $ScriptSection
+            $ExitCode = Start-CustomProcess -Path $PowerShellPath -Arguments ($DeployArgs -join ' ')
         }
         catch {
             if ([string]::IsNullOrEmpty($ExitCode)) {
-                $ExitCode = 69901
+                Write-Log -Message "ExitCode was Null or Empty in silent '$($Mode)'" -Source 'Start-CustomProcess' -ScriptSection $ScriptSection -Severity 3
+                Write-Log -Message "Error Message: `n$($_)" -Source 'Start-CustomProcess' -ScriptSection $ScriptSection -Severity 3
+                Write-Log -Message $LogDash -Source 'Write-Log' -ScriptSection $ScriptSection
+                $ExitCode = 69902
             }
-            Write-Log -Message "Error occured during $($Mode)" -Source 'Start-CustomProcess' -ScriptSection $ScriptSection
-            Write-Log -Message "Error Message: $($error[0])" -Source 'Start-CustomProcess' -ScriptSection $ScriptSection
+            Write-Log -Message "Error occurred during '$($Mode)'" -Source 'Start-CustomProcess' -ScriptSection $ScriptSection -Severity 3
+            Write-Log -Message "Error Message: `n$($_)" -Source 'Start-CustomProcess' -ScriptSection $ScriptSection -Severity 3
+            throw $($_)
+        }
+    }
+    #endregion Silent Processing
+    #region Interactive Processing
+    else {
+        foreach ($TargetProcess in $ExplorerProcesses) {
+            $Username = (Invoke-CimMethod -InputObject $TargetProcess -MethodName GetOwner).User
+            Write-Log -Message "'$Username' logged in running explorer PID: '$($TargetProcess.ProcessId)'" -Source 'Invoke-CimMethod' -ScriptSection $ScriptSection
+        }
+
+        if ($UserName -ne 'defaultuser0') {
+            Write-Log -Message "'$Username' appears to be normal user; launching process interactively." -Source 'Invoke-CimMethod' -ScriptSection $ScriptSection
+            $ScriptSection = 'InteractiveProcessing'
+            try {
+                Write-Log -Message 'Running Deploy-Application.ps1 via vbscript from ServiceUI' -Source 'Start-CustomProcess' -ScriptSection $ScriptSection
+                [string]$PowerShellPath = (Get-Command -Name 'powershell.exe').Source
+                [string]$CScriptPath = (Get-Command -Name 'wscript.exe').Source
+                $DeployArgs = @(
+                    '-ExecutionPolicy Bypass'
+                    '-NoProfile'
+                    '-NoLogo'
+                    '-WindowStyle Hidden'
+                    "-File `"`"$PSScriptRoot\Deploy-Application.ps1`"`" -DeploymentType $($Mode)"
+                )
+                #Running VB Script to prevent command window from popping up during interactive install using ServiceUI
+                $VBSStuff = @"
+Set objShell = CreateObject("Wscript.Shell")
+Set args = Wscript.Arguments
+iReturn = objShell.Run("$PowerShellPath $($DeployArgs -join ' ')",0,True)
+wscript.quit iReturn
+"@
+                $VBSStuff | Out-File -FilePath "$PSScriptRoot\ps-run.vbs" -Encoding 'ascii'
+                $VBSArgs = @(
+                    "//E:vbscript"
+                    "\`"$PSScriptRoot\ps-run.vbs\`""
+                )
+
+                Write-Log -Message "Verifying that file '$PSScriptRoot\ps-run.vbs' is present on the system." -Source 'Test-Path' -ScriptSection $ScriptSection
+                if (Test-Path -Path "$PSScriptRoot\ps-run.vbs" -PathType 'Leaf') {
+                    Write-Log -Message "Starting CustomProcess function with path '$CScriptPath' and with the following arguments '$($VBSArgs -join ' ')' " -Source 'Start-CustomProcess' -ScriptSection $ScriptSection
+                    $ExitCode = Start-CustomProcess -Path $CScriptPath -Arguments ($VBSArgs -join ' ') -ServiceUI
+                }
+                else {
+                    Write-Log -Message "File '$PSScriptRoot\ps-run.vbs' was not present on the system." -Source 'Test-Path' -ScriptSection $ScriptSection -Severity 3
+                    Write-Log -Message $LogDash -Source 'Write-Log' -ScriptSection $ScriptSection
+                    $ExitCode = 69902
+                }
+            }
+            catch {
+                if ([string]::IsNullOrEmpty($ExitCode)) {
+                    Write-Log -Message "ExitCode was Null or Empty in Interactive '$($Mode)'." -Source 'Start-CustomProcess' -ScriptSection $ScriptSection -Severity 3
+                    Write-Log -Message "Error Message: `n$($_)" -Source 'Start-CustomProcess' -ScriptSection $ScriptSection -Severity 3
+                    Write-Log -Message $LogDash -Source 'Write-Log' -ScriptSection $ScriptSection
+                    $ExitCode = 69902
+                }
+                Write-Log -Message 'Error occurred attempting to launch ServiceUI' -Source 'Start-CustomProcess' -ScriptSection $ScriptSection -Severity 3
+                Write-Log -Message "Error Message: `n$($_)" -Source 'Start-CustomProcess' -ScriptSection $ScriptSection -Severity 3
+                throw $($_)
+            }
+        }
+        else {
+            $ScriptSection = 'SilentProcessing'
+            Write-Log -Message "'$Username' is defaultuser0; launching process silently as we must still be in ESP." -Source 'Invoke-CimMethod' -ScriptSection $ScriptSection
+            try {
+                [string]$PowerShellPath = (Get-Command -Name 'powershell.exe').Source
+                $DeployArgs = @(
+                    '-ExecutionPolicy Bypass'
+                    '-NoProfile'
+                    '-NoLogo'
+                    '-WindowStyle Hidden'
+                    "-File `"`"$PSScriptRoot\Deploy-Application.ps1`"`" -DeploymentType $($Mode) -DeployMode Silent"
+                )
+                Write-Log -Message "Performing silent '$($Mode)' with the following arguments '$DeployArgs'" -Source 'Start-CustomProcess' -ScriptSection $ScriptSection
+                $ExitCode = Start-CustomProcess -Path $PowerShellPath -Arguments ($DeployArgs -join ' ')
+            }
+            catch {
+                if ([string]::IsNullOrEmpty($ExitCode)) {
+                    Write-Log -Message "ExitCode was Null or Empty in silent '$($Mode)' for defaultuser0." -Source 'Start-CustomProcess' -ScriptSection $ScriptSection -Severity 3
+                    Write-Log -Message $LogDash -Source 'Write-Log' -ScriptSection $ScriptSection
+                    $ExitCode = 69902
+                }
+                Write-Log -Message "Error occurred during $($Mode)" -Source 'Start-CustomProcess' -ScriptSection $ScriptSection -Severity 3
+                Write-Log -Message "Error Message: `n$($_)" -Source 'Start-CustomProcess' -ScriptSection $ScriptSection -Severity 3
+                throw $($_)
+            }
         }
     }
 }
+catch {
+    Write-Log -Message 'There was an unexpected problem in the Processing phase' -Source 'Write-Log' -ScriptSection $ScriptSection -Severity 3
+    Write-Log -Message "Error Message: `n$($_)" -Source 'Write-Log' -ScriptSection $ScriptSection -Severity 3
+    Write-Log -Message $LogDash -Source 'Write-Log' -ScriptSection $ScriptSection
+    exit 69902
+}
+finally {
+    Write-Log -Message "Returning to default sleep state policy. Computer may have turned off at '$(Get-Date)' depending on state." -Source 'PowerUtil-Shutdown' -ScriptSection $ScriptSection
+    # Clear the power requests.
+    [Windows.PowerUtil]::Shutdown()
+}
+
 #endregion Interactive Processing
-$ScriptSection = 'Post-Processing'
-Write-Log -Message "$($Mode) Exit Code = $($ExitCode)" -Source 'Write-Log' -ScriptSection $scriptSection
-Write-Log -Message $LogDash -Source 'Write-Log' -ScriptSection $scriptSection
-exit $ExitCode
+try {
+    $ScriptSection = 'Post-Processing'
+    Write-Log -Message "$($Mode) Exit Code = $($ExitCode)" -Source 'Write-Log' -ScriptSection $ScriptSection
+    exit $ExitCode
+}
+catch {
+    Write-Log -Message 'There was an unexpected problem in the Post-Processing phase' -Source 'Write-Log' -ScriptSection $ScriptSection -Severity 3
+    Write-Log -Message "Error Message: `n$($_)" -Source 'Write-Log' -ScriptSection $ScriptSection -Severity 3
+    Write-Log -Message $LogDash -Source 'Write-Log' -ScriptSection $ScriptSection
+    exit 69902
+}
+finally {
+    Write-Log -Message $LogDash -Source 'Write-Log' -ScriptSection $ScriptSection
+}
