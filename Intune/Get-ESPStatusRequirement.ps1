@@ -162,6 +162,6 @@ try {
     }
 }
 catch {
-    Write-Host 'ESP is not running'
+    Write-Host 'ESP is complete'
     exit 0
 }
